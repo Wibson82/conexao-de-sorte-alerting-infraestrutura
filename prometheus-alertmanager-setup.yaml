@@ -1,0 +1,447 @@
+# ============================================================================
+# 🚨 PROMETHEUS ALERTMANAGER - CONEXÃO DE SORTE ALERTING INFRASTRUCTURE
+# ============================================================================
+# Configuração completa do AlertManager com integração PagerDuty e
+# políticas de escalation para microsserviços conexao-de-sorte-backend-{nome}
+# ============================================================================
+
+# ========================================
+# 🚨 ALERTMANAGER CONFIGURATION
+# ========================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conexao-de-sorte-alertmanager-config
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: conexao-de-sorte-alerting
+data:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'smtp.gmail.com:587'
+      smtp_from: 'alerts@conexaodesorte.com'
+      smtp_auth_username: 'alerts@conexaodesorte.com'
+      smtp_auth_password_file: '/etc/alertmanager/secrets/smtp-password'
+      pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+      slack_api_url_file: '/etc/alertmanager/secrets/slack-webhook'
+      
+    # Templates para notificações
+    templates:
+    - '/etc/alertmanager/templates/*.tmpl'
+    
+    # Configuração de rotas
+    route:
+      group_by: ['alertname', 'cluster', 'service']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 1h
+      receiver: 'default-receiver'
+      routes:
+      
+      # Alertas críticos - PagerDuty imediato
+      - match:
+          severity: critical
+        receiver: 'pagerduty-critical'
+        group_wait: 0s
+        repeat_interval: 5m
+        routes:
+        # Serviços financeiros - escalation especial
+        - match:
+            service: 'conexao-de-sorte-backend-financeiro'
+          receiver: 'pagerduty-financial-critical'
+          group_wait: 0s
+          repeat_interval: 2m
+          
+      # Alertas de warning - Slack + Email
+      - match:
+          severity: warning
+        receiver: 'slack-warnings'
+        group_wait: 30s
+        repeat_interval: 30m
+        
+      # Alertas de performance - Equipe de DevOps
+      - match_re:
+          alertname: '(HighResponseTime|HighErrorRate|HighMemoryUsage|HighCPUUsage)'
+        receiver: 'devops-performance'
+        group_wait: 1m
+        repeat_interval: 15m
+        
+      # Alertas de segurança - Equipe de Security
+      - match_re:
+          alertname: '(SecurityViolation|UnauthorizedAccess|SuspiciousActivity)'
+        receiver: 'security-team'
+        group_wait: 0s
+        repeat_interval: 5m
+        
+      # Alertas de negócio - Equipe de Produto
+      - match_re:
+          alertname: '(LowConversionRate|HighUserDropoff|PaymentFailures)'
+        receiver: 'product-team'
+        group_wait: 5m
+        repeat_interval: 1h
+    
+    # Configuração de inibição
+    inhibit_rules:
+    - source_match:
+        severity: 'critical'
+      target_match:
+        severity: 'warning'
+      equal: ['alertname', 'cluster', 'service']
+      
+    - source_match:
+        alertname: 'ServiceDown'
+      target_match_re:
+        alertname: '(HighResponseTime|HighErrorRate)'
+      equal: ['service']
+    
+    # Configuração de receivers
+    receivers:
+    
+    # Receiver padrão
+    - name: 'default-receiver'
+      email_configs:
+      - to: 'devops@conexaodesorte.com'
+        subject: '[Conexão de Sorte] {{ .GroupLabels.alertname }}'
+        body: |
+          {{ range .Alerts }}
+          Alerta: {{ .Annotations.summary }}
+          Descrição: {{ .Annotations.description }}
+          Serviço: {{ .Labels.service }}
+          Severidade: {{ .Labels.severity }}
+          {{ end }}
+    
+    # PagerDuty para alertas críticos
+    - name: 'pagerduty-critical'
+      pagerduty_configs:
+      - service_key_file: '/etc/alertmanager/secrets/pagerduty-service-key'
+        description: '[CRÍTICO] {{ .GroupLabels.alertname }} - {{ .GroupLabels.service }}'
+        details:
+          summary: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+          description: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+          service: '{{ .GroupLabels.service }}'
+          severity: '{{ .GroupLabels.severity }}'
+          cluster: '{{ .GroupLabels.cluster }}'
+        client: 'Conexão de Sorte Monitoring'
+        client_url: 'https://grafana.conexaodesorte.com'
+        
+    # PagerDuty especial para serviços financeiros
+    - name: 'pagerduty-financial-critical'
+      pagerduty_configs:
+      - service_key_file: '/etc/alertmanager/secrets/pagerduty-financial-key'
+        description: '[FINANCEIRO CRÍTICO] {{ .GroupLabels.alertname }}'
+        details:
+          summary: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+          description: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+          service: '{{ .GroupLabels.service }}'
+          severity: 'critical'
+          impact: 'financial-operations'
+        client: 'Conexão de Sorte Financial Monitoring'
+        client_url: 'https://grafana.conexaodesorte.com/d/financial'
+        
+    # Slack para warnings
+    - name: 'slack-warnings'
+      slack_configs:
+      - channel: '#alerts-warnings'
+        title: '⚠️ {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Serviço:* {{ .Labels.service }}
+          *Descrição:* {{ .Annotations.description }}
+          *Runbook:* {{ .Annotations.runbook_url }}
+          {{ end }}
+        color: 'warning'
+        send_resolved: true
+        
+    # Equipe DevOps - Performance
+    - name: 'devops-performance'
+      slack_configs:
+      - channel: '#devops-performance'
+        title: '📊 Performance Alert: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Serviço:* {{ .Labels.service }}
+          *Métrica:* {{ .Annotations.summary }}
+          *Valor Atual:* {{ .Annotations.current_value }}
+          *Threshold:* {{ .Annotations.threshold }}
+          *Dashboard:* https://grafana.conexaodesorte.com/d/{{ .Labels.service }}
+          {{ end }}
+        color: 'danger'
+      email_configs:
+      - to: 'devops-performance@conexaodesorte.com'
+        subject: '[Performance] {{ .GroupLabels.alertname }} - {{ .GroupLabels.service }}'
+        
+    # Equipe Security
+    - name: 'security-team'
+      slack_configs:
+      - channel: '#security-alerts'
+        title: '🔒 Security Alert: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Serviço:* {{ .Labels.service }}
+          *Tipo:* {{ .Annotations.security_type }}
+          *Descrição:* {{ .Annotations.description }}
+          *Ação Requerida:* {{ .Annotations.action_required }}
+          {{ end }}
+        color: 'danger'
+      pagerduty_configs:
+      - service_key_file: '/etc/alertmanager/secrets/pagerduty-security-key'
+        description: '[SECURITY] {{ .GroupLabels.alertname }}'
+        
+    # Equipe Produto
+    - name: 'product-team'
+      slack_configs:
+      - channel: '#product-alerts'
+        title: '📈 Business Alert: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Métrica de Negócio:* {{ .Annotations.business_metric }}
+          *Impacto:* {{ .Annotations.business_impact }}
+          *Valor Atual:* {{ .Annotations.current_value }}
+          *Esperado:* {{ .Annotations.expected_value }}
+          {{ end }}
+        color: 'warning'
+      email_configs:
+      - to: 'product@conexaodesorte.com'
+        subject: '[Business Impact] {{ .GroupLabels.alertname }}'
+
+---
+# ========================================
+# 📧 NOTIFICATION TEMPLATES
+# ========================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conexao-de-sorte-alert-templates
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/name: alertmanager-templates
+    app.kubernetes.io/part-of: conexao-de-sorte-alerting
+data:
+  default.tmpl: |
+    {{ define "conexao.title" }}
+    [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] 
+    {{ .GroupLabels.SortedPairs.Values | join " " }} {{ if gt (len .CommonLabels) (len .GroupLabels) }}({{ with .CommonLabels.Remove .GroupLabels.Names }}{{ .Values | join " " }}{{ end }}){{ end }}
+    {{ end }}
+
+    {{ define "conexao.slack.text" }}
+    {{ range .Alerts }}
+    *Alert:* {{ .Annotations.summary }}{{ if .Labels.severity }} - `{{ .Labels.severity }}`{{ end }}
+    *Description:* {{ .Annotations.description }}
+    *Service:* {{ .Labels.service }}
+    *Details:*
+    {{ range .Labels.SortedPairs }} • *{{ .Name }}:* `{{ .Value }}`
+    {{ end }}
+    {{ end }}
+    {{ end }}
+
+    {{ define "conexao.email.subject" }}
+    [Conexão de Sorte] {{ .Status | title }}: {{ .GroupLabels.alertname }}
+    {{ end }}
+
+    {{ define "conexao.email.html" }}
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body { font-family: Arial, sans-serif; }
+            .alert { border-left: 4px solid #f39c12; padding: 10px; margin: 10px 0; }
+            .critical { border-left-color: #e74c3c; }
+            .warning { border-left-color: #f39c12; }
+            .info { border-left-color: #3498db; }
+            .resolved { border-left-color: #27ae60; }
+            .label { background: #ecf0f1; padding: 2px 6px; border-radius: 3px; }
+        </style>
+    </head>
+    <body>
+        <h2>Conexão de Sorte - Alert Notification</h2>
+        {{ range .Alerts }}
+        <div class="alert {{ .Labels.severity }}">
+            <h3>{{ .Annotations.summary }}</h3>
+            <p><strong>Description:</strong> {{ .Annotations.description }}</p>
+            <p><strong>Service:</strong> <span class="label">{{ .Labels.service }}</span></p>
+            <p><strong>Severity:</strong> <span class="label">{{ .Labels.severity }}</span></p>
+            <p><strong>Started:</strong> {{ .StartsAt.Format "2006-01-02 15:04:05" }}</p>
+            {{ if .Annotations.runbook_url }}
+            <p><strong>Runbook:</strong> <a href="{{ .Annotations.runbook_url }}">{{ .Annotations.runbook_url }}</a></p>
+            {{ end }}
+            {{ if .Annotations.dashboard_url }}
+            <p><strong>Dashboard:</strong> <a href="{{ .Annotations.dashboard_url }}">View Dashboard</a></p>
+            {{ end }}
+        </div>
+        {{ end }}
+    </body>
+    </html>
+    {{ end }}
+
+---
+# ========================================
+# 🔐 SECRETS PARA INTEGRAÇÃO
+# ========================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: conexao-de-sorte-alerting-secrets
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/name: alerting-secrets
+    app.kubernetes.io/part-of: conexao-de-sorte-alerting
+type: Opaque
+stringData:
+  # SMTP Configuration
+  smtp-password: "your-smtp-password-here"
+  
+  # PagerDuty Integration Keys
+  pagerduty-service-key: "your-pagerduty-service-key-here"
+  pagerduty-financial-key: "your-pagerduty-financial-key-here"
+  pagerduty-security-key: "your-pagerduty-security-key-here"
+  
+  # Slack Webhook URLs
+  slack-webhook: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+  
+  # Additional integrations
+  teams-webhook: "https://outlook.office.com/webhook/YOUR/TEAMS/WEBHOOK"
+  discord-webhook: "https://discord.com/api/webhooks/YOUR/DISCORD/WEBHOOK"
+
+---
+# ========================================
+# 📊 PROMETHEUS RULES PARA ALERTAS
+# ========================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: conexao-de-sorte-alerting-rules
+  namespace: istio-system
+  labels:
+    app.kubernetes.io/name: prometheus-rules
+    app.kubernetes.io/part-of: conexao-de-sorte-alerting
+spec:
+  groups:
+  
+  # Alertas de Infraestrutura
+  - name: conexao-de-sorte-infrastructure
+    interval: 30s
+    rules:
+    - alert: ServiceDown
+      expr: up{job=~"conexao-de-sorte-backend-.*"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        service: "{{ $labels.job }}"
+      annotations:
+        summary: "Serviço {{ $labels.job }} está down"
+        description: "O serviço {{ $labels.job }} não está respondendo há mais de 1 minuto"
+        runbook_url: "https://runbooks.conexaodesorte.com/service-down"
+        dashboard_url: "https://grafana.conexaodesorte.com/d/service-overview"
+        
+    - alert: HighMemoryUsage
+      expr: (container_memory_usage_bytes{name=~"conexao-de-sorte-backend-.*"} / container_spec_memory_limit_bytes) * 100 > 80
+      for: 5m
+      labels:
+        severity: warning
+        service: "{{ $labels.name }}"
+      annotations:
+        summary: "Alto uso de memória em {{ $labels.name }}"
+        description: "Uso de memória em {{ $labels.name }} está em {{ $value }}%"
+        current_value: "{{ $value }}%"
+        threshold: "80%"
+        
+    - alert: HighCPUUsage
+      expr: (rate(container_cpu_usage_seconds_total{name=~"conexao-de-sorte-backend-.*"}[5m]) * 100) > 80
+      for: 5m
+      labels:
+        severity: warning
+        service: "{{ $labels.name }}"
+      annotations:
+        summary: "Alto uso de CPU em {{ $labels.name }}"
+        description: "Uso de CPU em {{ $labels.name }} está em {{ $value }}%"
+        current_value: "{{ $value }}%"
+        threshold: "80%"
+  
+  # Alertas de Performance
+  - name: conexao-de-sorte-performance
+    interval: 30s
+    rules:
+    - alert: HighResponseTime
+      expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=~"conexao-de-sorte-backend-.*"}[5m])) > 1
+      for: 2m
+      labels:
+        severity: warning
+        service: "{{ $labels.job }}"
+      annotations:
+        summary: "Alto tempo de resposta em {{ $labels.job }}"
+        description: "95% das requests em {{ $labels.job }} estão levando mais de 1 segundo"
+        current_value: "{{ $value }}s"
+        threshold: "1s"
+        
+    - alert: HighErrorRate
+      expr: rate(http_requests_total{job=~"conexao-de-sorte-backend-.*",status=~"5.."}[5m]) / rate(http_requests_total{job=~"conexao-de-sorte-backend-.*"}[5m]) > 0.05
+      for: 2m
+      labels:
+        severity: critical
+        service: "{{ $labels.job }}"
+      annotations:
+        summary: "Alta taxa de erro em {{ $labels.job }}"
+        description: "Taxa de erro em {{ $labels.job }} está em {{ $value | humanizePercentage }}"
+        current_value: "{{ $value | humanizePercentage }}"
+        threshold: "5%"
+  
+  # Alertas de Negócio
+  - name: conexao-de-sorte-business
+    interval: 60s
+    rules:
+    - alert: LowConversionRate
+      expr: (rate(business_conversions_total[1h]) / rate(business_visits_total[1h])) < 0.02
+      for: 10m
+      labels:
+        severity: warning
+        service: "business-metrics"
+      annotations:
+        summary: "Taxa de conversão baixa"
+        description: "Taxa de conversão está em {{ $value | humanizePercentage }}, abaixo do esperado"
+        business_metric: "conversion_rate"
+        business_impact: "revenue"
+        current_value: "{{ $value | humanizePercentage }}"
+        expected_value: ">2%"
+        
+    - alert: PaymentFailures
+      expr: rate(payment_failures_total[5m]) > 0.1
+      for: 2m
+      labels:
+        severity: critical
+        service: "conexao-de-sorte-backend-financeiro"
+      annotations:
+        summary: "Falhas de pagamento detectadas"
+        description: "Taxa de falhas de pagamento está em {{ $value }} por minuto"
+        business_metric: "payment_failure_rate"
+        business_impact: "revenue_loss"
+        current_value: "{{ $value }}/min"
+        action_required: "Verificar gateway de pagamento"
+  
+  # Alertas de Segurança
+  - name: conexao-de-sorte-security
+    interval: 30s
+    rules:
+    - alert: UnauthorizedAccess
+      expr: rate(http_requests_total{status="401"}[5m]) > 10
+      for: 1m
+      labels:
+        severity: warning
+        service: "{{ $labels.job }}"
+      annotations:
+        summary: "Tentativas de acesso não autorizado"
+        description: "Muitas tentativas de acesso não autorizado em {{ $labels.job }}"
+        security_type: "authentication_failure"
+        action_required: "Verificar logs de segurança"
+        
+    - alert: SuspiciousActivity
+      expr: rate(security_violations_total[5m]) > 0
+      for: 0m
+      labels:
+        severity: critical
+        service: "{{ $labels.job }}"
+      annotations:
+        summary: "Atividade suspeita detectada"
+        description: "Violação de segurança detectada em {{ $labels.job }}"
+        security_type: "security_violation"
+        action_required: "Investigação imediata necessária"
